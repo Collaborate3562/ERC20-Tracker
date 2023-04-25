@@ -5,6 +5,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.middlewares.logging import LoggingMiddleware
 from config import TELEGRAM_API_TOKEN, CSV_FILE_PATH, TELEGRAM_CHAT_ID, INFURA_API_KEY, ETHERSCAN_API_KEY
 from web3 import Web3, HTTPProvider
+from web3._utils.abi import decode_hex
+from eth_abi import abi
 import requests
 import json
 from datetime import datetime, timedelta
@@ -16,6 +18,7 @@ logging.basicConfig(level=logging.INFO)
 INFURA_URL = f"https://mainnet.infura.io/v3/{INFURA_API_KEY}"
 w3 = Web3(HTTPProvider(INFURA_URL))
 
+last_block_number = w3.eth.block_number - 1
 # Set up Telegram bot
 bot = Bot(token=TELEGRAM_API_TOKEN)
 dp = Dispatcher(bot)
@@ -29,22 +32,36 @@ def load_csv(file_path):
 
 # Function to get ERC-20 token transactions for a given wallet address
 async def get_erc20_transactions(address):
-    transfer_event_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-    from_block = w3.eth.block_number - 100  # Adjust this value to set how many blocks back to check for transactions
+    global last_block_number
+    res = []
+
+    event_signature_hash = w3.keccak(text="Transfer(address,address,uint256)").hex()
+    from_block = last_block_number
 
     filter_params = {
         "fromBlock": from_block,
         "toBlock": "latest",
-        "topics": [transfer_event_topic, None, None],
-        "address": address
+        "topics": [event_signature_hash]
     }
 
     logs = w3.eth.get_logs(filter_params)
-    return logs
+
+    for log in logs:
+        if len(log['topics']) == 3:
+            topics = log['topics']
+            sender = '0x' + topics[1].hex()[-40:]
+            recipient = '0x' + topics[2].hex()[-40:]
+            if sender == address or recipient == address:
+                res.append(log)
+
+    last_block_number = w3.eth.block_number
+    return res
 
 # Function to get ETH transactions for a given wallet address
 async def get_eth_transactions(address):
-    from_block = w3.eth.block_number - 100
+    global last_block_number
+
+    from_block = last_block_number
     api_endpoint = f"https://api.etherscan.io/api?module=account&action=txlist&address={address}&startblock={from_block}&endblock=latest&page=1&offset=10&sort=desc&apikey={ETHERSCAN_API_KEY}"
 
     response = requests.get(api_endpoint)
@@ -52,9 +69,9 @@ async def get_eth_transactions(address):
 
     relevant_transactions = [tx for tx in transactions if tx["to"].lower() == address.lower() or tx["from"].lower() == address.lower()]
 
+    last_block_number = w3.eth.block_number
+
     return relevant_transactions
-
-
 
 # Function to monitor transactions for all wallets in the CSV file
 async def monitor_tokens():
@@ -68,6 +85,9 @@ async def monitor_tokens():
     for address in addresses:
         last_transactions[address] = {"erc20": None, "eth": None}
 
+    erc20_abi = []
+    with open("./erc20_abi.json") as f:
+        erc20_abi = json.load(f)
     while True:
         for address in addresses:
             transactions = await get_erc20_transactions(address)
@@ -78,31 +98,33 @@ async def monitor_tokens():
 
             # Handle erc20 transactions
             for tx in transactions:
-                tx_hash = tx["transactionHash"].hex()
-                if tx_hash != last_transactions[address]["erc20"]:
-                    last_transactions[address]["erc20"] = tx_hash
+                value = int(tx['data'].hex(), 16)
 
-                    tx_data = w3.eth.get_transaction(tx_hash)
-                    input_data = tx_data["input"]
+                contractAddress = str(tx['address'])
+                contract = w3.eth.contract(address=contractAddress, abi=erc20_abi)
 
-                    if len(input_data) >= 138:
-                        to_address = input_data[34:74]
-                        value = int(input_data[74:], 16) / (10 ** 18)
+                token_symbol = contract.functions.symbol().call()
+                token_decimal = contract.functions.decimals().call()
 
-                        from_address = tx_data["from"].lower()
-                        to_address = f"0x{to_address}".lower()
+                topics = tx['topics']
+                sender = '0x' + topics[1].hex()[-40:]
+                recipient = '0x' + topics[2].hex()[-40:]
 
-                        if from_address in addresses and to_address in addresses:
-                            continue
-                        elif from_address in addresses:
-                            action = "sent"
-                            nickname = address_nicknames[from_address.lower()]
-                        elif to_address in addresses:
-                            action = "received"
-                            nickname = address_nicknames[to_address.lower()]
+                if sender in addresses or recipient in addresses:
+                    transfer_amount = value / (10 ** token_decimal)
+                    message = ''
+                    if sender in addresses:
+                        action = "sent"
+                        nickname = address_nicknames[sender.lower()]
 
-                        message = f"{nickname} ({from_address if action == 'sent' else to_address}) {action} {value} tokens"
-                        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+                        message = f"{nickname} ({sender}) {action} {transfer_amount} {token_symbol} to {recipient}"
+                    elif recipient in addresses:
+                        action = "received"
+                        nickname = address_nicknames[recipient.lower()]
+
+                        message = f"{nickname} ({recipient}) {action} {transfer_amount} {token_symbol} from {sender}"
+
+                    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
 
             # Handle ETH transactions
             for tx in eth_transactions:
