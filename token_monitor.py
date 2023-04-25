@@ -18,7 +18,9 @@ logging.basicConfig(level=logging.INFO)
 INFURA_URL = f"https://mainnet.infura.io/v3/{INFURA_API_KEY}"
 w3 = Web3(HTTPProvider(INFURA_URL))
 
-last_block_number = w3.eth.block_number - 1
+# last_block_number = w3.eth.block_number - 5
+
+last_block_number = w3.eth.block_number -1
 # Set up Telegram bot
 bot = Bot(token=TELEGRAM_API_TOKEN)
 dp = Dispatcher(bot)
@@ -51,9 +53,10 @@ async def get_erc20_transactions(address):
             topics = log['topics']
             sender = '0x' + topics[1].hex()[-40:]
             recipient = '0x' + topics[2].hex()[-40:]
-            if sender == address or recipient == address:
+            if sender == address.lower() or recipient == address.lower():
                 res.append(log)
 
+    print(res)
     last_block_number = w3.eth.block_number
     return res
 
@@ -110,21 +113,20 @@ async def monitor_tokens():
                 sender = '0x' + topics[1].hex()[-40:]
                 recipient = '0x' + topics[2].hex()[-40:]
 
-                if sender in addresses or recipient in addresses:
-                    transfer_amount = value / (10 ** token_decimal)
-                    message = ''
-                    if sender in addresses:
-                        action = "sent"
-                        nickname = address_nicknames[sender.lower()]
+                transfer_amount = value / (10 ** token_decimal)
+                message = ''
+                if sender == address.lower():
+                    action = "sent"
+                    nickname = address_nicknames[address]
 
-                        message = f"{nickname} ({sender}) {action} {transfer_amount} {token_symbol} to {recipient}"
-                    elif recipient in addresses:
-                        action = "received"
-                        nickname = address_nicknames[recipient.lower()]
+                    message = f"{nickname} ({sender}) {action} {transfer_amount} {token_symbol} to {recipient}"
+                elif recipient == address.lower():
+                    action = "received"
+                    nickname = address_nicknames[address]
 
-                        message = f"{nickname} ({recipient}) {action} {transfer_amount} {token_symbol} from {sender}"
+                    message = f"{nickname} ({recipient}) {action} {transfer_amount} {token_symbol} from {sender}"
 
-                    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+                await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
 
             # Handle ETH transactions
             for tx in eth_transactions:
